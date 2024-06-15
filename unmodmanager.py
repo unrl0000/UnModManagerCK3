@@ -8,8 +8,9 @@ import concurrent.futures
 from pathlib import Path
 from typing import List, Dict
 from collections import defaultdict
-from tkinter import ttk, scrolledtext
+from tkinter import ttk, scrolledtext, filedialog
 from PIL import Image, ImageTk
+import zipfile
 
 class ModManager:
     def __init__(self, mods_directory: str, dlc_load_path: str, profiles_path: str):
@@ -47,6 +48,7 @@ class ModManager:
             config[profile] = self.profiles[profile]
         with open(self.profiles_path, 'w') as file:
             config.write(file)
+        self.profiles = self.load_profiles()
 
     def delete_profile(self, profile_name: str) -> None:
         if profile_name in self.profiles:
@@ -131,6 +133,12 @@ class ModManager:
                     self.dlc_data["enabled_mods"].remove(mod_file_path)
                 self.save_dlc_load()
 
+    def install_mod(self, zip_path: str) -> None:
+        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+            zip_ref.extractall(self.mods_directory)
+        self.mods = self.load_mods()
+        self.sync_enabled_mods()
+
 class ModManagerUI:
     def __init__(self, root, manager):
         self.manager = manager
@@ -177,8 +185,8 @@ class ModManagerUI:
         self.style_table(self.enabled_mods_table)
         self.enabled_mods_table.pack(fill=tk.BOTH, expand=True)
 
-        self.enabled_mods_table.bind("<Double-1>", self.edit_comment)
-        self.disabled_mods_table.bind("<Double-1>", self.edit_comment)
+        self.enabled_mods_table.bind("<Double-1>", lambda event: self.edit_comment(event) if event.widget.identify_column(event.x) == '#3' else self.toggle_mod(event))
+        self.disabled_mods_table.bind("<Double-1>", lambda event: self.edit_comment(event) if event.widget.identify_column(event.x) == '#3' else self.toggle_mod(event))
         
         self.enabled_mods_table.bind("<Button-3>", self.show_context_menu)
         self.disabled_mods_table.bind("<Button-3>", self.show_context_menu)
@@ -188,8 +196,18 @@ class ModManagerUI:
 
         self.progress_var = tk.DoubleVar()
 
-        self.enable_button = tk.Button(self.left_frame, text="Enable Mod", command=self.enable_mod, bg='#444444', fg='#ffffff')
-        self.enable_button.pack(pady=5)
+        self.button_frame = tk.Frame(self.left_frame, bg='#2e2e2e')
+        self.button_frame.pack(pady=5)
+
+        self.install_button = tk.Button(self.button_frame, text="Install", command=self.install_mod, bg='#444444', fg='#ffffff')
+        self.install_button.pack(side=tk.LEFT, padx=5)
+
+        self.refresh_button = tk.Button(self.button_frame, text="Refresh", command=self.load_mods, bg='#444444', fg='#ffffff')
+        self.refresh_button.pack(side=tk.LEFT, padx=5)
+        
+        self.enable_button = tk.Button(self.button_frame, text="Enable Mod", command=self.enable_mod, bg='#444444', fg='#ffffff')
+        self.enable_button.pack(side=tk.LEFT, padx=5)
+        
 
         self.move_buttons_frame = tk.Frame(self.right_frame, bg='#2e2e2e')
         self.move_buttons_frame.pack(fill=tk.X, pady=5)
@@ -211,7 +229,68 @@ class ModManagerUI:
         
         self.last_conflict_check_time = 0
         self.load_mods()
+
+        self.disabled_mods_search_vars = {}
+        self.enabled_mods_search_vars = {}
+
+        self.create_search_button(self.left_frame, self.disabled_mods_table, self.disabled_mods_search_vars, side=tk.LEFT)
+        self.create_search_button(self.right_frame, self.enabled_mods_table, self.enabled_mods_search_vars, side=tk.LEFT)
     
+    def create_search_button(self, parent, table, search_vars, side):
+        button_frame = tk.Frame(parent, bg='#2e2e2e')
+        button_frame.pack(fill=tk.X, padx=5, pady=2)
+
+        toggle_button = tk.Button(button_frame, text="Show Search", command=lambda: self.toggle_search(parent, table, search_vars, toggle_button), bg='#444444', fg='#ffffff')
+        toggle_button.pack(side=side, padx=5)
+
+    def toggle_search(self, parent, table, search_vars, button):
+        if button['text'] == "Show Search":
+            button['text'] = "Hide Search"
+            self.show_search_entries(parent, table, search_vars)
+        else:
+            button['text'] = "Show Search"
+            self.hide_search_entries(parent)
+
+    def show_search_entries(self, parent, table, search_vars):
+        for index, column_name in enumerate(["Name", "Version", "Comment", "Path"]):
+            self.create_search_entry(parent, index, column_name, table, search_vars)
+
+    def hide_search_entries(self, parent):
+        for widget in parent.winfo_children():
+            if isinstance(widget, tk.Frame) and any(isinstance(child, tk.Entry) for child in widget.winfo_children()):
+                widget.destroy()
+
+    def create_search_entry(self, parent, column_index, column_name, table, search_vars):
+        search_frame = tk.Frame(parent, bg='#2e2e2e')
+        search_frame.pack(fill=tk.X, padx=5, pady=2)
+
+        search_label = tk.Label(search_frame, text=f"Search {column_name}", bg='#2e2e2e', fg='#ffffff')
+        search_label.pack(side=tk.LEFT)
+
+        search_var = tk.StringVar()
+        search_entry = tk.Entry(search_frame, textvariable=search_var, bg='#444444', fg='#ffffff')
+        search_entry.pack(fill=tk.X, padx=5)
+
+        search_var.trace_add("write", lambda name, index, mode, sv=search_var: self.filter_table(table, search_vars))
+        search_vars[column_index] = search_var
+
+    def filter_table(self, table, search_vars):
+        search_terms = {index: var.get().lower() for index, var in search_vars.items()}
+        children = table.get_children()
+        for item in children:
+            table.delete(item)
+
+        filtered_mods = []
+        if table == self.disabled_mods_table:
+            filtered_mods = [mod for mod in self.manager.list_mods() if not mod.get('enabled')]
+        else:
+            filtered_mods = [mod for mod in self.manager.list_mods() if mod.get('enabled')]
+
+        for mod in filtered_mods:
+            values = (mod['name'], mod['version'], mod['comment'], mod['path'])
+            if all(search_terms[i] in values[i].lower() for i in search_terms):
+                table.insert("", tk.END, values=values)
+                    
     def show_context_menu(self, event):
         widget = event.widget
         selection = widget.selection()
@@ -238,6 +317,20 @@ class ModManagerUI:
 
     def toggle_preview(self):
         self.preview_on_hover.set(not self.preview_on_hover.get())
+    
+    def toggle_mod(self, event):
+        selected_item = event.widget.focus()
+        if not selected_item:
+            return
+
+        mod_name = event.widget.item(selected_item, "values")[0]
+        enabled_mods = [mod['name'] for mod in self.manager.mods if mod.get('enabled')]
+
+        if mod_name in enabled_mods:
+            self.manager.disable_mod(mod_name)
+        else:
+            self.manager.enable_mod(mod_name)
+        self.load_mods()
 
     def on_hover(self, event):
         if self.preview_on_hover.get():
@@ -382,37 +475,42 @@ class ModManagerUI:
         self.manager.comments[mod_path] = comment
         self.manager.save_comments()
 
+
     def edit_comment(self, event):
         selected_item = event.widget.focus()
         column = event.widget.identify_column(event.x)
         if column != '#3':
             return
-        
+
         item_bbox = event.widget.bbox(selected_item, column)
         if not item_bbox:
             return
 
         current_comment = event.widget.item(selected_item, "values")[2]
 
-        entry_popup = tk.Entry(event.widget)
-        entry_popup.place(x=item_bbox[0], y=item_bbox[1], width=item_bbox[2], height=item_bbox[3])
-        entry_popup.insert(0, current_comment)
+        if hasattr(self, 'entry_popup') and self.entry_popup.winfo_exists():
+            self.entry_popup.destroy()
 
-        def save_comment(event, entry_popup=entry_popup, treeview=event.widget, selected_item=selected_item, column=column):
-            comment = entry_popup.get()
-            values = treeview.item(selected_item, "values")
-            if len(values) < 4:
-                entry_popup.destroy()
-                return
-            mod_path = values[3]
-            self.manager.comments[mod_path] = comment
-            self.manager.save_comments()
-            treeview.set(selected_item, column, comment)
-            entry_popup.destroy()
+        self.entry_popup = tk.Entry(event.widget)
+        self.entry_popup.place(x=item_bbox[0], y=item_bbox[1], width=item_bbox[2], height=item_bbox[3])
+        self.entry_popup.insert(0, current_comment)
 
-        entry_popup.bind('<Return>', save_comment)
-        entry_popup.bind('<FocusOut>', lambda e: save_comment(e))
-        entry_popup.focus()
+        def save_comment(event, entry_popup=self.entry_popup, treeview=event.widget, selected_item=selected_item, column=column):
+            try:
+                comment = entry_popup.get()
+                values = treeview.item(selected_item, "values")
+                if len(values) < 4:
+                    return
+                mod_path = values[3]
+                self.manager.comments[mod_path] = comment
+                self.manager.save_comments()
+                treeview.set(selected_item, column, comment)
+            finally:
+                entry_popup.destroy() 
+
+        self.entry_popup.bind('<Return>', save_comment)
+        self.entry_popup.bind('<FocusOut>', lambda e: save_comment(e))
+        self.entry_popup.focus()
 
     def load_mods(self):
         self.conflict_button.config(command=self.find_conflicts)
@@ -421,7 +519,8 @@ class ModManagerUI:
         self.enabled_mods_table.delete(*self.enabled_mods_table.get_children())
 
         mods = self.manager.list_mods()
-        enabled_mods = [mod for mod in mods if mod.get('enabled')]
+        enabled_mods = sorted([mod for mod in mods if mod.get('enabled')],
+                            key=lambda x: self.manager.dlc_data["enabled_mods"].index(f"mod/{x['path']}"))
         disabled_mods = [mod for mod in mods if not mod.get('enabled')]
 
         self.create_table(self.disabled_mods_table, disabled_mods)
@@ -642,6 +741,12 @@ class ModManagerUI:
                     break
         self.manager.dlc_data["enabled_mods"] = mod_paths
         self.manager.save_dlc_load()
+
+    def install_mod(self):
+        zip_path = filedialog.askopenfilename(filetypes=[("ZIP files", "*.zip")])
+        if zip_path:
+            self.manager.install_mod(zip_path)
+            self.load_mods()
 
 if __name__ == "__main__":
     user_name = os.getlogin()
