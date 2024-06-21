@@ -1,19 +1,24 @@
+# logic/conflict_finder.py
+
 import os
 import time
 import threading
+import subprocess
 import concurrent.futures
 from collections import defaultdict
-from PyQt5 import QtWidgets, QtCore
+from PyQt5 import QtWidgets, QtCore, QtGui
 
 class ConflictFinder(QtCore.QObject):
     update_progress_signal = QtCore.pyqtSignal(int)
     display_conflicts_signal = QtCore.pyqtSignal(dict, dict, list)
+    display_missing_translations_signal = QtCore.pyqtSignal(dict)
 
     def __init__(self, manager, parent=None):
         super().__init__(parent)
         self.manager = manager
         self.last_conflict_check_time = 0
         self.conflict_window = None
+        self.missing_translations_window = None
         self.finding_conflicts = False 
 
     def find_conflicts(self):
@@ -32,6 +37,7 @@ class ConflictFinder(QtCore.QObject):
 
         self.update_progress_signal.connect(self.progress_window.setValue)
         self.display_conflicts_signal.connect(self.display_conflicts)
+        self.display_missing_translations_signal.connect(self.display_missing_translations)
 
         threading.Thread(target=self.find_conflicts_thread).start()
 
@@ -97,11 +103,66 @@ class ConflictFinder(QtCore.QObject):
             if 'russian' not in os.listdir(mod_path):
                 missing_russian.append(mod_folder)
 
+        missing_translations = self.find_missing_translations()
+
         update_progress(2, 100)
 
         self.display_conflicts_signal.emit(red_conflicts, yellow_conflicts, missing_russian)
+        self.display_missing_translations_signal.emit(missing_translations)
         self.finding_conflicts = False
 
+    def find_missing_translations(self):
+        missing_translations = {}
+        for mod in self.manager.mods:
+            if not mod.get('enabled'):
+                continue
+
+            mod_folder = mod['path'].split('.')[0]
+            mod_path = os.path.join(self.manager.mods_directory, mod_folder)
+            english_path = os.path.join(mod_path, 'localization', 'english')
+            russian_path = os.path.join(mod_path, 'localization', 'russian')
+
+            if not os.path.exists(english_path) or not os.path.exists(russian_path):
+                continue
+
+            english_files = [f for f in os.listdir(english_path) if f.endswith('_l_english.yml')]
+            russian_files = [f for f in os.listdir(russian_path) if f.endswith('_l_russian.yml')]
+
+            for eng_file in english_files:
+                rus_file = eng_file.replace('_l_english.yml', '_l_russian.yml')
+                if rus_file not in russian_files:
+                    if mod_folder not in missing_translations:
+                        missing_translations[mod_folder] = []
+                    missing_translations[mod_folder].append(('missing', eng_file))
+                else:
+                    eng_content = self.read_file_content(os.path.join(english_path, eng_file))
+                    rus_content = self.read_file_content(os.path.join(russian_path, rus_file))
+                    if self.compare_contents(eng_content, rus_content):
+                        if mod_folder not in missing_translations:
+                            missing_translations[mod_folder] = []
+                        missing_translations[mod_folder].append(('identical', rus_file))
+
+        return missing_translations
+
+    def read_file_content(self, file_path):
+        with open(file_path, 'r', encoding='utf-8-sig') as file:
+            return file.read()
+
+    def compare_contents(self, eng_content, rus_content):
+        eng_lines = eng_content.split('\n')
+        rus_lines = rus_content.split('\n')
+
+        if len(eng_lines) != len(rus_lines):
+            return False
+
+        different_lines = 0
+        for eng_line, rus_line in zip(eng_lines, rus_lines):
+            if eng_line.strip() != rus_line.strip():
+                different_lines += 1
+
+        # Если менее 10% строк отличаются, считаем содержимое идентичным
+        return different_lines / len(eng_lines) < 0.1
+    
     def display_conflicts(self, red_conflicts, yellow_conflicts, missing_russian):
         if self.conflict_window is None:
             self.conflict_window = QtWidgets.QDialog(self.parent(), QtCore.Qt.Window)
@@ -144,7 +205,7 @@ class ConflictFinder(QtCore.QObject):
             file_path = os.path.join(mod_folder, mod_path)
             folder_path = os.path.dirname(file_path)
             if os.path.isdir(folder_path):
-                os.system(f'explorer /select,"{file_path}"')
+                subprocess.Popen(f'explorer /select,"{file_path}"')
 
         row_id_counter = 0
 
@@ -222,3 +283,73 @@ class ConflictFinder(QtCore.QObject):
 
         self.conflict_window.resize(table_width, table_height)
         self.conflict_window.show()
+
+    def display_missing_translations(self, missing_translations):
+        if self.missing_translations_window is None:
+            self.missing_translations_window = QtWidgets.QDialog(self.parent(), QtCore.Qt.Window)
+            self.missing_translations_window.setWindowTitle("Missing or Identical Russian Translations")
+            self.missing_translations_window.rejected.connect(self.missing_translations_window.hide)
+        elif self.missing_translations_window.isVisible():
+            self.missing_translations_window.hide()
+
+        layout = QtWidgets.QVBoxLayout(self.missing_translations_window)
+
+        table = QtWidgets.QTableWidget()
+        table.setColumnCount(4) 
+        table.setHorizontalHeaderLabels(["", "Mod", "Name", "Status"])
+        layout.addWidget(table)
+
+        row = 0
+        for mod, files in missing_translations.items():
+            for status, file in files:
+                table.insertRow(row)
+
+                # Колонка X (кнопка удаления)
+                remove_button = QtWidgets.QPushButton("X")
+                remove_button.clicked.connect(lambda _, r=row: table.removeRow(r))
+                table.setCellWidget(row, 0, remove_button)
+
+                # Колонка File 1
+                mod_button = QtWidgets.QPushButton(mod)
+                mod_button.clicked.connect(lambda _, m=mod, f=file: self.open_file_explorer(m, f))
+                table.setCellWidget(row, 1, mod_button)
+
+                # Колонка Path
+                path_button = QtWidgets.QPushButton(file)
+                path_button.clicked.connect(lambda _, m=mod, f=file: self.open_file_explorer(m, f))
+                table.setCellWidget(row, 2, path_button)
+
+                # Колонка Status
+                status_text = "Missing Russian Translation" if status == 'missing' else "Identical Content (eng content too)"
+                status_item = QtWidgets.QTableWidgetItem(status_text)
+                status_item.setForeground(QtGui.QColor(QtCore.Qt.red if status == 'missing' else QtGui.QColor(255, 165, 0)))
+                table.setItem(row, 3, status_item)
+
+                row += 1
+
+        header = table.horizontalHeader()
+        header.setSectionResizeMode(QtWidgets.QHeaderView.ResizeToContents)
+
+        table.resizeColumnsToContents()
+        table.setColumnWidth(0, 30)
+
+        screen_geometry = QtWidgets.QApplication.primaryScreen().availableGeometry()
+        table_width = sum(table.columnWidth(i) for i in range(table.columnCount())) + table.verticalHeader().width() + table.verticalScrollBar().sizeHint().width() + 50
+        table_height = sum(table.rowHeight(i) for i in range(table.rowCount())) + table.horizontalHeader().height() + table.horizontalScrollBar().sizeHint().height() + 30
+
+        self.missing_translations_window.resize(table_width, table_height)
+        self.missing_translations_window.show()
+
+    def open_file_explorer(self, mod_id, file_name):
+        mod_folder = os.path.join(self.manager.mods_directory, mod_id)
+        english_file_path = os.path.join(mod_folder, 'localization', 'english', file_name)
+        russian_file_path = os.path.join(mod_folder, 'localization', 'russian', file_name.replace('_l_english.yml', '_l_russian.yml'))
+        
+        if os.path.isfile(russian_file_path):
+            file_path = russian_file_path
+        else:
+            file_path = english_file_path
+        
+        folder_path = os.path.dirname(file_path)
+        if os.path.isdir(folder_path):
+            subprocess.Popen(f'explorer /select,"{file_path}"', shell=True)
