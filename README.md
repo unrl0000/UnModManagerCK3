@@ -5,7 +5,7 @@ This is a simple and crude mod manager for the game Crusader Kings 3, the main p
 I did it for my own use, so I hope that at least it will work for you.
 
 Direct download link:
-https://github.com/unrl0000/UnModManagerCK3/releases/download/v0.0.1/UnModManagerCK3.exe    
+https://github.com/unrl0000/UnModManagerCK3/releases/download/v0.2.1/unModManagerCK3.exe
 
 ---
 
@@ -16,4 +16,4 @@ https://github.com/unrl0000/UnModManagerCK3/releases/download/v0.0.1/UnModManage
 Делал для своего собственного пользования, поэтому я надеюсь, что у вас он хотя бы будет работать.
 
 Прямая ссылка на скачивание:
-https://github.com/unrl0000/UnModManagerCK3/releases/download/v0.0.1/UnModManagerCK3.exe    
+https://github.com/unrl0000/UnModManagerCK3/releases/download/v0.2.1/unModManagerCK3.exe
